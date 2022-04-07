@@ -1,18 +1,15 @@
-use std::{
-  collections::{hash_map::DefaultHasher, HashMap, HashSet},
-  hash::{Hash, Hasher},
-  sync::{Arc, Mutex},
-};
-
 use arc_swap::ArcSwap;
-use jack::{
-  AsyncClient, Client, MidiIn, NotificationHandler, Port, PortFlags, ProcessHandler, Unowned,
+use jack::{AsyncClient, Client, MidiIn, NotificationHandler, Port, ProcessHandler, Unowned};
+use std::{
+  collections::{HashMap, HashSet},
+  sync::{Arc, Mutex},
 };
 use thiserror::Error;
 
 use crate::{
   drivers,
   endpoints::{DestinationInfo, SourceId, SourceInfo},
+  messages::{utility::Utility, Message, MessageType},
   Event, Filter, InputConfig, InputHandler, InputInfo, SourceMatches,
 };
 
@@ -140,16 +137,13 @@ impl NotificationHandler for Notifications {
     let port = client.port_by_id(_port_id_b).unwrap();
     let mut endpoints = self.endpoints.lock().unwrap();
     endpoints.add_source(source_id, name.clone(), port.clone());
-    if let Some(source) = endpoints.get_source(source_id) {
-      for input in self.inputs.lock().unwrap().values_mut() {
-        if !input.connected.contains(&source_id) {
-          if let Some(filter) = input.sources.match_filter(source_id, name.as_str()) {
-            let mut filters = input.filters.load().as_ref().clone();
-            filters.insert(source_id, filter);
-            input.filters.swap(Arc::new(filters));
-            // client.connect_ports(&source, &port).unwrap();
-            input.connected.insert(source_id);
-          }
+    for input in self.inputs.lock().unwrap().values_mut() {
+      if !input.connected.contains(&source_id) {
+        if let Some(filter) = input.sources.match_filter(source_id, name.as_str()) {
+          let mut filters = input.filters.load().as_ref().clone();
+          filters.insert(source_id, filter);
+          input.filters.swap(Arc::new(filters));
+          input.connected.insert(source_id);
         }
       }
     }
@@ -169,13 +163,19 @@ impl NotificationHandler for Notifications {
 
 impl ProcessHandler for JackHost {
   fn process(&mut self, _: &jack::Client, ps: &jack::ProcessScope) -> jack::Control {
-    for input in self.inputs.lock().unwrap().values() {
+    for input in self.inputs.lock().unwrap().values_mut() {
       let show_p = input.port.iter(ps);
       for e in show_p {
-        // let c: Event = Event {endpoint: input };
-        // input.handler.call(c);
-        let c: MidiCopy = e.into();
-        dbg!(c);
+        // TODO: Build real message
+        let c: Event = Event {
+          endpoint: 0,
+          message: Message {
+            group: 0,
+            mtype: MessageType::Utility(Utility::Noop),
+          },
+          timestamp: e.time as u64,
+        };
+        input.handler.call(c);
       }
     }
     jack::Control::Continue
