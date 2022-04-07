@@ -1,30 +1,37 @@
+#[cfg(target_os = "macos")]
 use core_foundation::runloop::CFRunLoop;
 use kiro_midi::{self as midi, drivers::DriverSpec};
 
 fn main() {
   let mut driver = midi::drivers::create("test").unwrap();
 
-  let input_config1 = midi::InputConfig::new("novation").with_source(
-    midi::SourceMatch::regex("Novation SL MkIII.*").unwrap(),
+  let input_config1 = midi::InputConfig::new("jack").with_source(
+    midi::SourceMatch::regex(".*").unwrap(),
     midi::Filter::default(),
   );
 
-  let input_config2 = midi::InputConfig::new("arturia").with_source(
-    midi::SourceMatch::regex("Midi.*").unwrap(),
-    midi::Filter::default().with_channels(1, &[1, 2]),
-  );
+  let (client, _status) = jack::Client::new("test", jack::ClientOptions::NO_START_SERVER).unwrap();
+  driver.activate(client);
+  println!("Driver activated");
+
+  // let client = driver.run_loop();
+  //
+  // let active_client = driver
+  //   .client
+  //   .unwrap()
+  //   .activate_async(Notifications, driver.host)
+  //   .unwrap();
+  // self.active_client = Some(active_client);
 
   driver
     .create_input(input_config1, |event| println!(">> {:?}", event))
     .unwrap();
 
-  driver
-    .create_input(input_config2, |event| println!(">> {:?}", event))
-    .unwrap();
+  println!("Inputs created");
 
   print_endpoints(&driver);
 
-  let _join = std::thread::spawn(move || loop {
+  loop {
     loop {
       let mut input_line = String::new();
       std::io::stdin()
@@ -33,28 +40,25 @@ fn main() {
 
       print_endpoints(&driver);
 
-      if let Some(mut arturia_config) = driver.get_input_config("arturia") {
-        arturia_config.sources.add_source(
-          midi::SourceMatch::regex("Midi.*").unwrap(),
-          midi::Filter::default().with_channels(1, &[1]),
+      if let Some(mut input_config) = driver.get_input_config("jack") {
+        // dbg!(&input_config);
+        input_config.sources.add_source(
+          midi::SourceMatch::regex(".*").unwrap(),
+          midi::Filter::default(),
         );
 
         driver
           .set_input_sources(
-            "arturia",
+            "jack",
             midi::SourceMatches::default().with_source(
-              midi::SourceMatch::regex("IAC.*").unwrap(),
-              midi::Filter::default().with_channels(1, &[1]),
+              midi::SourceMatch::regex(".*").unwrap(),
+              midi::Filter::default(),
             ),
           )
           .ok();
       }
     }
-  });
-
-  println!("=== Press Ctrl-C to stop ===");
-  println!("=== Press Enter to list endpoints ===");
-  CFRunLoop::run_current();
+  }
 }
 
 fn print_endpoints(driver: &midi::drivers::Driver) {

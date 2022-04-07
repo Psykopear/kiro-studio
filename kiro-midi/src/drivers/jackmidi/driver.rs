@@ -5,13 +5,13 @@ use std::{
 };
 
 use arc_swap::ArcSwap;
-use jack::{Client, MidiIn, MidiOut, Port, PortFlags, ProcessHandler};
+use jack::{AsyncClient, Client, MidiIn, NotificationHandler, Port, PortFlags, ProcessHandler, Unowned};
 use thiserror::Error;
 
 use crate::{
   drivers,
   endpoints::{DestinationInfo, SourceId, SourceInfo},
-  Filter, InputConfig, InputHandler, InputInfo, SourceMatches,
+  Event, Filter, InputConfig, InputHandler, InputInfo, SourceMatches,
 };
 
 use super::endpoints::Endpoints;
@@ -62,20 +62,6 @@ pub enum JackMidiError {
   InputNotFound(InputName),
 }
 
-pub struct JackMidiHost {
-  inputs: HashMap<String, Port<MidiIn>>,
-  outputs: Vec<Port<MidiOut>>,
-}
-
-impl JackMidiHost {
-  pub fn new(client: &jack::Client) -> Self {
-    Self {
-      inputs: HashMap::new(),
-      outputs: vec![],
-    }
-  }
-}
-
 type InputName = String;
 struct Input {
   name: InputName,
@@ -86,21 +72,110 @@ struct Input {
   handler: InputHandler,
 }
 
-pub struct JackMidiDriver {
-  client: Client,
-  endpoints: Arc<Mutex<Endpoints>>,
-  inputs: Arc<Mutex<HashMap<String, Input>>>,
+#[derive(Clone)]
+struct JackHost {
+  pub endpoints: Arc<Mutex<Endpoints>>,
+  pub inputs: Arc<Mutex<HashMap<String, Input>>>,
 }
 
-impl ProcessHandler for JackMidiDriver {
+pub struct JackMidiDriver {
+  // client: Option<Client>,
+  active_client: Option<AsyncClient<Notifications, JackHost>>,
+  host: Arc<JackHost>,
+}
+
+struct Notifications {
+  pub endpoints: Arc<Mutex<Endpoints>>,
+  pub inputs: Arc<Mutex<HashMap<String, Input>>>,
+}
+
+impl NotificationHandler for Notifications {
+  fn thread_init(&self, _: &Client) {
+    println!("Thread init");
+  }
+
+  fn shutdown(&mut self, _status: jack::ClientStatus, _reason: &str) {
+    println!("Shutdown");
+  }
+
+  fn freewheel(&mut self, _: &Client, _is_freewheel_enabled: bool) {
+    println!("Freewheel");
+  }
+
+  fn sample_rate(&mut self, _: &Client, _srate: jack::Frames) -> jack::Control {
+    println!("Sample rate");
+    jack::Control::Continue
+  }
+
+  fn client_registration(&mut self, _: &Client, _name: &str, _is_registered: bool) {
+    println!("Client registration");
+  }
+
+  fn port_registration(&mut self, _: &Client, _port_id: jack::PortId, _is_registered: bool) {
+    println!("Port registration");
+  }
+
+  fn port_rename(
+    &mut self,
+    _: &Client,
+    _port_id: jack::PortId,
+    _old_name: &str,
+    _new_name: &str,
+  ) -> jack::Control {
+    println!("Port rename");
+    jack::Control::Continue
+  }
+
+  fn ports_connected(
+    &mut self,
+    client: &Client,
+    _port_id_a: jack::PortId,
+    _port_id_b: jack::PortId,
+    _are_connected: bool,
+  ) {
+    let source_id = _port_id_a as u64;
+    let name = client.port_by_id(_port_id_a).unwrap().name().unwrap();
+    let port = client.port_by_id(_port_id_b).unwrap();
+    let mut endpoints = self.endpoints.lock().unwrap();
+    endpoints.add_source(source_id, name.clone(), port.clone());
+    if let Some(source) = endpoints.get_source(source_id) {
+      for input in self.inputs.lock().unwrap().values_mut() {
+        if !input.connected.contains(&source_id) {
+          if let Some(filter) = input.sources.match_filter(source_id, name.as_str()) {
+            let mut filters = input.filters.load().as_ref().clone();
+            filters.insert(source_id, filter);
+            input.filters.swap(Arc::new(filters));
+            // client.connect_ports(&source, &port).unwrap();
+            input.connected.insert(source_id);
+          }
+        }
+      }
+    }
+    println!("Port connected");
+  }
+
+  fn graph_reorder(&mut self, _: &Client) -> jack::Control {
+    println!("Graph reorder");
+    jack::Control::Continue
+  }
+
+  fn xrun(&mut self, _: &Client) -> jack::Control {
+    println!("XRUN!");
+    jack::Control::Continue
+  }
+}
+
+impl ProcessHandler for JackHost {
   fn process(&mut self, _: &jack::Client, ps: &jack::ProcessScope) -> jack::Control {
-    // for input in self.inputs.values() {
-    //   let show_p = input.iter(ps);
-    //   for e in show_p {
-    //     let c: MidiCopy = e.into();
-    //     dbg!(c);
-    //   }
-    // }
+    for input in self.inputs.lock().unwrap().values() {
+      let show_p = input.port.iter(ps);
+      for e in show_p {
+        // let c: Event = Event {endpoint: input };
+        // input.handler.call(c);
+        let c: MidiCopy = e.into();
+        dbg!(c);
+      }
+    }
     jack::Control::Continue
   }
 }
@@ -109,26 +184,42 @@ impl JackMidiDriver {
   pub fn new(name: &str) -> Result<Self, drivers::Error> {
     let endpoints = Arc::new(Mutex::new(Endpoints::new()));
     let inputs = Arc::new(Mutex::new(HashMap::new()));
-    let (client, _status) = jack::Client::new(name, jack::ClientOptions::NO_START_SERVER)
-      .map_err(|_| JackMidiError::ClientCreate)?;
+    let host = JackHost { endpoints, inputs };
+    // let (client, _status) = jack::Client::new(name, jack::ClientOptions::NO_START_SERVER)
+    //   .map_err(|_| JackMidiError::ClientCreate)?;
+    // let active_client = client.activate_async(Notifications, host).unwrap();
     Ok(Self {
-      client,
-      endpoints,
-      inputs,
+      // client: Some(client),
+      host: Arc::new(host),
+      active_client: None,
     })
   }
 }
 
-fn calculate_hash<T>(t: &T) -> u64
-where
-  T: Hash,
-{
-  let mut s = DefaultHasher::new();
-  t.hash(&mut s);
-  s.finish()
-}
-
 impl drivers::DriverSpec for JackMidiDriver {
+  fn activate(&mut self, client: Client) {
+    let host = Arc::make_mut(&mut self.host);
+    let notifications = Notifications {
+      inputs: host.inputs.clone(),
+      endpoints: host.endpoints.clone(),
+    };
+    // let host = self.host.lock().unwrap().to_owned();
+    self.active_client = Some(
+      client
+        .activate_async(notifications, host.to_owned())
+        .unwrap(),
+    );
+  }
+  // fn run_loop(mut self) -> Self {
+  //   let active_client = self
+  //     .client
+  //     .unwrap()
+  //     .activate_async(Notifications, self.host)
+  //     .unwrap();
+  //   self.active_client = Some(active_client);
+  //   self
+  // }
+
   fn create_input<H>(
     &mut self,
     config: crate::InputConfig,
@@ -137,7 +228,9 @@ impl drivers::DriverSpec for JackMidiDriver {
   where
     H: Into<crate::InputHandler>,
   {
-    if self
+    let host = &self.host;
+    // dbg!(&config.name);
+    if host
       .inputs
       .lock()
       .map_err(|_| JackMidiError::PortCreate)?
@@ -145,32 +238,47 @@ impl drivers::DriverSpec for JackMidiDriver {
     {
       return Err(JackMidiError::InputAlreadyExists(config).into());
     };
+    println!("Input 1");
     let InputConfig { name, sources } = config;
-    let filters = self
-      .client
-      .ports(None, None, PortFlags::IS_INPUT)
-      .iter()
-      .filter_map(|port_name| {
-        let id = calculate_hash(port_name);
+    let client = self.active_client.as_ref().unwrap().as_client();
+    let filters = host
+      .endpoints
+      .lock()
+      .unwrap()
+      .connected_sources()
+      .into_iter()
+      .filter_map(|connected_source| {
         sources
-          .match_filter(id, port_name.as_str())
-          .map(|filter| (id, filter))
+          .match_filter(connected_source.id, connected_source.name.as_str())
+          .map(|filter| (connected_source.id, filter))
       })
       .collect::<HashMap<SourceId, Filter>>();
+    println!("Input 2");
+    // let filters = client
+    //   .ports(None, None, PortFlags::IS_INPUT)
+    //   .iter()
+    //   .filter_map(|port_name| {
+    //     let id = calculate_hash(port_name);
+    //     sources
+    //       .match_filter(id, port_name.as_str())
+    //       .map(|filter| (id, filter))
+    //   })
+    //   .collect::<HashMap<SourceId, Filter>>();
 
     let filters = Arc::new(ArcSwap::new(Arc::new(filters)));
 
     // let mut port = self.client.create_input_port(name.clone(), handler.into(), filters.clone())?;
-    let port = self
-      .client
+    let port = client
       .register_port(&name, MidiIn)
       .map_err(|_| JackMidiError::PortCreate)?;
 
     let mut connected = HashSet::new();
-    let endpoints = self.endpoints.lock().unwrap();
+    let host = &self.host;
+    println!("Input 3");
+    let endpoints = host.endpoints.lock().unwrap();
     for source_id in filters.load().keys().cloned() {
       if let Some(source) = endpoints.get_source(source_id) {
-        if let Ok(()) = self.client.connect_ports(&source, &port) {
+        if let Ok(()) = client.connect_ports(&source, &port) {
           connected.insert(source_id);
         }
       }
@@ -183,25 +291,28 @@ impl drivers::DriverSpec for JackMidiDriver {
       port,
       handler: handler.into(),
     };
-    self.inputs.lock().unwrap().insert(name.clone(), input);
+    host.inputs.lock().unwrap().insert(name.clone(), input);
     Ok(name)
   }
 
   fn sources(&self) -> Vec<crate::endpoints::SourceInfo> {
-    let endpoints = self.endpoints.lock().unwrap();
+    let host = &self.host;
+    let endpoints = host.endpoints.lock().unwrap();
 
     let mut source_inputs = HashMap::<SourceId, HashSet<String>>::new();
-    for input in self.inputs.lock().unwrap().values() {
+    for input in host.inputs.lock().unwrap().values() {
       for source_id in input.connected.iter().cloned() {
         let inputs = source_inputs.entry(source_id).or_default();
         inputs.insert(input.name.clone());
       }
     }
+    // dbg!(&source_inputs);
 
     endpoints
       .connected_sources()
       .into_iter()
       .map(|connected_source| {
+        // dbg!(&connected_source);
         let inputs = source_inputs
           .get(&connected_source.id)
           .map(|inputs| inputs.iter().cloned().collect::<Vec<String>>())
@@ -213,12 +324,14 @@ impl drivers::DriverSpec for JackMidiDriver {
 
   fn destinations(&self) -> Vec<crate::endpoints::DestinationInfo> {
     self
+      .host
       .endpoints
       .lock()
       .unwrap()
       .connected_destinations()
       .into_iter()
       .map(|connected_destination| {
+        // dbg!(&connected_destination);
         DestinationInfo::new(connected_destination.id, connected_destination.name.clone())
       })
       .collect()
@@ -226,6 +339,7 @@ impl drivers::DriverSpec for JackMidiDriver {
 
   fn inputs(&self) -> Vec<crate::InputInfo> {
     self
+      .host
       .inputs
       .lock()
       .unwrap()
@@ -240,6 +354,7 @@ impl drivers::DriverSpec for JackMidiDriver {
 
   fn get_input_config(&self, name: &str) -> Option<crate::InputConfig> {
     self
+      .host
       .inputs
       .lock()
       .unwrap()
@@ -255,9 +370,10 @@ impl drivers::DriverSpec for JackMidiDriver {
     name: &str,
     sources: crate::SourceMatches,
   ) -> Result<(), drivers::Error> {
-    let endpoints = self.endpoints.lock().unwrap();
+    let host = &self.host;
+    let endpoints = host.endpoints.lock().unwrap();
 
-    let mut inputs = self.inputs.lock().unwrap();
+    let mut inputs = host.inputs.lock().unwrap();
 
     let input = inputs
       .get_mut(name)
@@ -271,15 +387,16 @@ impl drivers::DriverSpec for JackMidiDriver {
           .match_filter(connected_source.id, connected_source.name.as_str())
           .map(|filter| (connected_source.id, filter, &connected_source.source))
       })
-      .collect::<Vec<(SourceId, Filter, &Port<MidiIn>)>>();
+      .collect::<Vec<(SourceId, Filter, &Port<Unowned>)>>();
 
     let mut filters = HashMap::<SourceId, Filter>::with_capacity(connected_sources.len());
     let mut disconnected = input.connected.clone();
 
+    let client = self.active_client.as_ref().unwrap().as_client();
     for (source_id, filter, source) in connected_sources {
       filters.insert(source_id, filter);
       if !input.connected.contains(&source_id) {
-        if let Ok(()) = self.client.connect_ports(&source, &input.port) {
+        if let Ok(()) = client.connect_ports(&source, &input.port) {
           input.connected.insert(source_id);
         }
       } else {
@@ -289,7 +406,7 @@ impl drivers::DriverSpec for JackMidiDriver {
 
     for source_id in disconnected {
       if let Some(source) = endpoints.get_source(source_id) {
-        self.client.disconnect_ports(source, &input.port).ok();
+        client.disconnect_ports(source, &input.port).ok();
       }
     }
 

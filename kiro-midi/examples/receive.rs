@@ -1,4 +1,3 @@
-use core_foundation::runloop::CFRunLoop;
 use kiro_midi::{self as midi, drivers::DriverSpec, Filter, InputConfig, SourceMatch};
 
 fn main() {
@@ -27,7 +26,6 @@ fn main() {
       std::io::stdin()
         .read_line(&mut input_line)
         .expect("Failed to read line");
-
       print_endpoints(&driver);
     }
   });
@@ -36,7 +34,10 @@ fn main() {
   println!("=== Press Enter to list endpoints ===");
 
   // This is required in MacOS to be able to handle notifications whenever devices are plugged/unplugged
-  CFRunLoop::run_current();
+  // driver.run_loop();
+        loop {
+            std::thread::sleep_ms(1000);
+        }
 }
 
 fn print_endpoints(driver: &midi::drivers::Driver) {

@@ -4,15 +4,18 @@ use std::collections::HashMap;
 use jack::MidiIn;
 use jack::MidiOut;
 use jack::Port;
+use jack::Unowned;
 
 use crate::endpoints::{DestinationId, SourceId};
 
+#[derive(Debug)]
 pub struct ConnectedSource {
   pub id: SourceId,
   pub name: String,
-  pub source: Port<MidiIn>,
+  pub source: Port<Unowned>,
 }
 
+#[derive(Debug)]
 pub struct ConnectedDestination {
   pub id: SourceId,
   pub name: String,
@@ -65,14 +68,14 @@ impl Endpoints {
     destinations
   }
 
-  pub fn add_source(&mut self, id: SourceId, name: String, source: Port<MidiIn>) {
+  pub fn add_source(&mut self, id: SourceId, name: String, source: Port<jack::Unowned>) {
     if let hash_map::Entry::Vacant(connected_source) = self.connected_sources.entry(id) {
       self.disconnected_sources.remove(&id);
       connected_source.insert(ConnectedSource { id, name, source });
     }
   }
 
-  pub fn remove_source(&mut self, source: Port<MidiIn>) -> Option<ConnectedSource> {
+  pub fn remove_source(&mut self, source: Port<Unowned>) -> Option<ConnectedSource> {
     let maybe_connected_source = self
       .connected_sources
       .iter()
@@ -92,7 +95,7 @@ impl Endpoints {
     })
   }
 
-  pub fn get_source(&self, source_id: SourceId) -> Option<&Port<MidiIn>> {
+  pub fn get_source(&self, source_id: SourceId) -> Option<&Port<Unowned>> {
     self
       .connected_sources
       .get(&source_id)

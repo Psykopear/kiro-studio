@@ -1,4 +1,5 @@
 use arc_swap::ArcSwap;
+use core_foundation::runloop::CFRunLoop;
 use core_foundation_sys::base::OSStatus;
 use coremidi::{
   Client, EventList, InputPortWithContext, Notification, NotifyCallback, Object, ObjectType,
@@ -75,7 +76,7 @@ impl drivers::DriverSpec for CoreMidiDriver {
         .into_iter()
         .filter_map(|connected_source| {
           sources
-            .match_filter(connected_source.id, connected_source.name.as_str())
+            // .match_filter(connected_source.id, connected_source.name.as_str())
             .map(|filter| (connected_source.id, filter))
         })
         .collect::<HashMap<SourceId, Filter>>();
@@ -180,7 +181,7 @@ impl drivers::DriverSpec for CoreMidiDriver {
       .into_iter()
       .filter_map(|connected_source| {
         sources
-          .match_filter(connected_source.id, connected_source.name.as_str())
+          // .match_filter(connected_source.id, connected_source.name.as_str())
           .map(|filter| (connected_source.id, filter, &connected_source.source))
       })
       .collect::<Vec<(SourceId, Filter, &Source)>>();
