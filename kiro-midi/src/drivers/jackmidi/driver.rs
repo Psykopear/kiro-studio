@@ -5,7 +5,9 @@ use std::{
 };
 
 use arc_swap::ArcSwap;
-use jack::{AsyncClient, Client, MidiIn, NotificationHandler, Port, PortFlags, ProcessHandler, Unowned};
+use jack::{
+  AsyncClient, Client, MidiIn, NotificationHandler, Port, PortFlags, ProcessHandler, Unowned,
+};
 use thiserror::Error;
 
 use crate::{
@@ -80,7 +82,7 @@ struct JackHost {
 
 pub struct JackMidiDriver {
   // client: Option<Client>,
-  active_client: Option<AsyncClient<Notifications, JackHost>>,
+  active_client: AsyncClient<Notifications, JackHost>,
   host: Arc<JackHost>,
 }
 
@@ -184,42 +186,28 @@ impl JackMidiDriver {
   pub fn new(name: &str) -> Result<Self, drivers::Error> {
     let endpoints = Arc::new(Mutex::new(Endpoints::new()));
     let inputs = Arc::new(Mutex::new(HashMap::new()));
-    let host = JackHost { endpoints, inputs };
-    // let (client, _status) = jack::Client::new(name, jack::ClientOptions::NO_START_SERVER)
-    //   .map_err(|_| JackMidiError::ClientCreate)?;
-    // let active_client = client.activate_async(Notifications, host).unwrap();
+    let mut host = Arc::new(JackHost { endpoints, inputs });
+    let not_host = Arc::make_mut(&mut host);
+    let (client, _status) = jack::Client::new(name, jack::ClientOptions::NO_START_SERVER)
+      .map_err(|_| JackMidiError::ClientCreate)?;
+    let active_client = client
+      .activate_async(
+        Notifications {
+          inputs: not_host.inputs.clone(),
+          endpoints: not_host.endpoints.clone(),
+        },
+        not_host.to_owned(),
+      )
+      .unwrap();
     Ok(Self {
       // client: Some(client),
-      host: Arc::new(host),
-      active_client: None,
+      host,
+      active_client,
     })
   }
 }
 
 impl drivers::DriverSpec for JackMidiDriver {
-  fn activate(&mut self, client: Client) {
-    let host = Arc::make_mut(&mut self.host);
-    let notifications = Notifications {
-      inputs: host.inputs.clone(),
-      endpoints: host.endpoints.clone(),
-    };
-    // let host = self.host.lock().unwrap().to_owned();
-    self.active_client = Some(
-      client
-        .activate_async(notifications, host.to_owned())
-        .unwrap(),
-    );
-  }
-  // fn run_loop(mut self) -> Self {
-  //   let active_client = self
-  //     .client
-  //     .unwrap()
-  //     .activate_async(Notifications, self.host)
-  //     .unwrap();
-  //   self.active_client = Some(active_client);
-  //   self
-  // }
-
   fn create_input<H>(
     &mut self,
     config: crate::InputConfig,
@@ -240,7 +228,7 @@ impl drivers::DriverSpec for JackMidiDriver {
     };
     println!("Input 1");
     let InputConfig { name, sources } = config;
-    let client = self.active_client.as_ref().unwrap().as_client();
+    let client = self.active_client.as_client();
     let filters = host
       .endpoints
       .lock()
@@ -253,28 +241,14 @@ impl drivers::DriverSpec for JackMidiDriver {
           .map(|filter| (connected_source.id, filter))
       })
       .collect::<HashMap<SourceId, Filter>>();
-    println!("Input 2");
-    // let filters = client
-    //   .ports(None, None, PortFlags::IS_INPUT)
-    //   .iter()
-    //   .filter_map(|port_name| {
-    //     let id = calculate_hash(port_name);
-    //     sources
-    //       .match_filter(id, port_name.as_str())
-    //       .map(|filter| (id, filter))
-    //   })
-    //   .collect::<HashMap<SourceId, Filter>>();
 
     let filters = Arc::new(ArcSwap::new(Arc::new(filters)));
-
-    // let mut port = self.client.create_input_port(name.clone(), handler.into(), filters.clone())?;
     let port = client
       .register_port(&name, MidiIn)
       .map_err(|_| JackMidiError::PortCreate)?;
 
     let mut connected = HashSet::new();
     let host = &self.host;
-    println!("Input 3");
     let endpoints = host.endpoints.lock().unwrap();
     for source_id in filters.load().keys().cloned() {
       if let Some(source) = endpoints.get_source(source_id) {
@@ -392,7 +366,7 @@ impl drivers::DriverSpec for JackMidiDriver {
     let mut filters = HashMap::<SourceId, Filter>::with_capacity(connected_sources.len());
     let mut disconnected = input.connected.clone();
 
-    let client = self.active_client.as_ref().unwrap().as_client();
+    let client = self.active_client.as_client();
     for (source_id, filter, source) in connected_sources {
       filters.insert(source_id, filter);
       if !input.connected.contains(&source_id) {

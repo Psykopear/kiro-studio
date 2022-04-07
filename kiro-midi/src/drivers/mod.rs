@@ -35,7 +35,6 @@ pub trait DriverSpec {
   fn inputs(&self) -> Vec<InputInfo>;
   fn get_input_config(&self, name: &str) -> Option<InputConfig>;
   fn set_input_sources(&self, name: &str, sources: SourceMatches) -> Result<(), Error>;
-fn activate(&mut self, client: jack::Client);
 }
 
 #[enum_dispatch]

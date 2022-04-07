@@ -10,19 +10,6 @@ fn main() {
     midi::Filter::default(),
   );
 
-  let (client, _status) = jack::Client::new("test", jack::ClientOptions::NO_START_SERVER).unwrap();
-  driver.activate(client);
-  println!("Driver activated");
-
-  // let client = driver.run_loop();
-  //
-  // let active_client = driver
-  //   .client
-  //   .unwrap()
-  //   .activate_async(Notifications, driver.host)
-  //   .unwrap();
-  // self.active_client = Some(active_client);
-
   driver
     .create_input(input_config1, |event| println!(">> {:?}", event))
     .unwrap();
