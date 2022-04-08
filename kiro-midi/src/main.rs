@@ -5,13 +5,23 @@ use kiro_midi::{self as midi, drivers::DriverSpec};
 fn main() {
   let mut driver = midi::drivers::create("test").unwrap();
 
-  let input_config1 = midi::InputConfig::new("jack").with_source(
+  let input_config1 = midi::InputConfig::new("all").with_source(
     midi::SourceMatch::regex(".*").unwrap(),
     midi::Filter::default(),
   );
 
+  let input_config2 = midi::InputConfig::new("out").with_source(
+    midi::SourceMatch::regex("out.*").unwrap(),
+    midi::Filter::default(),
+  );
+
+
   driver
-    .create_input(input_config1, |event| println!(">> {:?}", event))
+    .create_input(input_config1, |event| println!("all >> {:?}", event))
+    .unwrap();
+
+  driver
+    .create_input(input_config2, |event| println!("out >> {:?}", event))
     .unwrap();
 
   println!("Inputs created");

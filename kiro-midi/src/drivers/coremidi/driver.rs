@@ -10,9 +10,8 @@ use std::sync::Arc;
 use thiserror::Error;
 
 use crate::drivers;
-use crate::drivers::coremidi::endpoints::Endpoints;
 use crate::drivers::coremidi::timestamp::coremidi_timestamp_to_nanos;
-use crate::endpoints::{DestinationInfo, EndpointId, SourceId, SourceInfo};
+use crate::endpoints::{DestinationInfo, EndpointId, SourceId, SourceInfo, Endpoints};
 use crate::event::Event;
 use crate::filter::Filter;
 use crate::input_config::InputConfig;
@@ -54,7 +53,7 @@ struct Input {
 
 pub struct CoreMidiDriver {
   client: Client,
-  endpoints: Arc<Mutex<Endpoints>>,
+  endpoints: Arc<Mutex<Endpoints<coremidi::Source, coremidi::Destination>>>,
   inputs: Arc<Mutex<HashMap<String, Input>>>,
 }
 

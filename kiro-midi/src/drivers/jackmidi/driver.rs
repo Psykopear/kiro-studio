@@ -8,12 +8,10 @@ use thiserror::Error;
 
 use crate::{
   drivers,
-  endpoints::{DestinationInfo, SourceId, SourceInfo},
+  endpoints::{DestinationInfo, Endpoints, SourceId, SourceInfo},
   messages::{utility::Utility, Message, MessageType},
   Event, Filter, InputConfig, InputHandler, InputInfo, SourceMatches,
 };
-
-use super::endpoints::Endpoints;
 
 const MAX_MIDI: usize = 3;
 
@@ -73,19 +71,18 @@ struct Input {
 
 #[derive(Clone)]
 struct JackHost {
-  pub endpoints: Arc<Mutex<Endpoints>>,
+  pub endpoints: Arc<Mutex<Endpoints<Port<Unowned>, Port<Unowned>>>>,
+  pub inputs: Arc<Mutex<HashMap<String, Input>>>,
+}
+
+struct Notifications {
+  pub endpoints: Arc<Mutex<Endpoints<Port<Unowned>, Port<Unowned>>>>,
   pub inputs: Arc<Mutex<HashMap<String, Input>>>,
 }
 
 pub struct JackMidiDriver {
-  // client: Option<Client>,
   active_client: AsyncClient<Notifications, JackHost>,
   host: Arc<JackHost>,
-}
-
-struct Notifications {
-  pub endpoints: Arc<Mutex<Endpoints>>,
-  pub inputs: Arc<Mutex<HashMap<String, Input>>>,
 }
 
 impl NotificationHandler for Notifications {
