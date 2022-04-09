@@ -1,4 +1,3 @@
-use crate::protocol::decoder::{DecoderProtocol, DecoderProtocol2, DecoderProtocol1};
 use arc_swap::ArcSwap;
 use jack::{AsyncClient, Client, MidiIn, NotificationHandler, Port, ProcessHandler, Unowned};
 use std::{
@@ -10,43 +9,9 @@ use thiserror::Error;
 use crate::{
   drivers,
   endpoints::{DestinationInfo, Endpoints, SourceId, SourceInfo},
-  messages::{utility::Utility, Message, MessageType},
+  protocol::decoder::{DecoderProtocol, DecoderProtocol1},
   Event, Filter, InputConfig, InputHandler, InputInfo, SourceMatches,
 };
-
-const MAX_MIDI: usize = 3;
-
-#[derive(Copy, Clone)]
-struct MidiCopy {
-  len: usize,
-  data: [u8; MAX_MIDI],
-  time: jack::Frames,
-}
-
-impl From<jack::RawMidi<'_>> for MidiCopy {
-  fn from(midi: jack::RawMidi<'_>) -> Self {
-    let len = std::cmp::min(MAX_MIDI, midi.bytes.len());
-    let mut data = [0; MAX_MIDI];
-    data[..len].copy_from_slice(&midi.bytes[..len]);
-    MidiCopy {
-      len,
-      data,
-      time: midi.time,
-    }
-  }
-}
-
-impl std::fmt::Debug for MidiCopy {
-  fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-    write!(
-      f,
-      "Midi {{ time: {}, len: {}, data: {:?} }}",
-      self.time,
-      self.len,
-      &self.data[..self.len]
-    )
-  }
-}
 
 #[derive(Error, Debug)]
 pub enum JackMidiError {
@@ -176,28 +141,13 @@ impl ProcessHandler for JackHost {
         input.decoder.reset();
         for word in show_p {
           // The first byte indicates the rest of the message is MIDI1
-          println!("word: {:?}", word.bytes);
           let bytes: [u8; 4] = match word.bytes {
             [one, two, three] => [0b0010_0000, *one, *two, *three],
             [one, two] => [0b0010_0000, *one, *two, 0],
             _ => panic!(),
           };
-          println!("bytes: {:b} {:b} {:b} {:b}", bytes[0], bytes[1], bytes[2], bytes[3] );
-          use byteorder::{BigEndian, ReadBytesExt};
-          use std::io::Cursor;
-          let mut rdr = Cursor::new(bytes);
-          let res = rdr.read_u32::<BigEndian>().unwrap();
-          println!("bo: {:b}", res);
           let bytes = u32::from_be_bytes(bytes);
-          println!("be: {:b}", bytes);
-          // let bytes = u32::from_ne_bytes(bytes);
-          // println!("ne: {:b}", _bytes);
-          // let bytes = u32::from_le_bytes(bytes);
-          // println!("le: {:b}", bytes);
-          // let unle: [u8; 4] = bytes.to_le_bytes();
-          // println!("unle: {:b} {:b} {:b} {:b}", unle[0], unle[1], unle[2], unle[3] );
           if let Ok(Some(message)) = input.decoder.next(bytes, &filter) {
-            dbg!(message);
             let event = Event {
               timestamp: word.time as u64,
               endpoint: *source_id,
@@ -205,16 +155,6 @@ impl ProcessHandler for JackHost {
             };
             input.handler.call(event);
           }
-          // TODO: Build real message
-          // let c: Event = Event {
-          //   endpoint: 0,
-          //   message: Message {
-          //     group: 0,
-          //     mtype: MessageType::Utility(Utility::Noop),
-          //   },
-          //   timestamp: e.time as u64,
-          // };
-          // input.handler.call(c);
         }
       }
     }
@@ -240,7 +180,6 @@ impl JackMidiDriver {
       )
       .unwrap();
     Ok(Self {
-      // client: Some(client),
       host,
       active_client,
     })
@@ -288,7 +227,6 @@ impl drivers::DriverSpec for JackMidiDriver {
       .load()
       .keys()
       .into_iter()
-      // For future me: I'm sorry
       .filter_map(|source_id| {
         endpoints.get_source(*source_id).and_then(|source| {
           client

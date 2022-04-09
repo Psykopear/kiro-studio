@@ -1,3 +1,7 @@
+use std::time::Duration;
+
+#[cfg(target_os = "macos")]
+use core_foundation::runloop::CFRunLoop;
 use kiro_midi::{self as midi, drivers::DriverSpec, Filter, InputConfig, SourceMatch};
 
 fn main() {
@@ -34,10 +38,14 @@ fn main() {
   println!("=== Press Enter to list endpoints ===");
 
   // This is required in MacOS to be able to handle notifications whenever devices are plugged/unplugged
-  // driver.run_loop();
-        loop {
-            std::thread::sleep_ms(1000);
-        }
+  #[cfg(target_os = "macos")]
+  CFRunLoop::run_current();
+
+  // On linux we just sleep in loop to keep the other thread alive
+  #[cfg(target_os = "linux")]
+  loop {
+    std::thread::sleep(Duration::from_secs(1));
+  }
 }
 
 fn print_endpoints(driver: &midi::drivers::Driver) {
