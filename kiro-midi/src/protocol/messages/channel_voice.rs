@@ -1,5 +1,79 @@
 use crate::protocol::{Decode, Encode};
 
+// MIDI1 version of the channel voice message.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ChannelVoice1 {
+  pub channel: u8,
+  pub message: ChanelVoiceMessage1,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ChanelVoiceMessage1 {
+  NoteOff { note: u8, velocity: u8 },
+  NoteOn { note: u8, velocity: u8 },
+  PolyPressure { note: u8, data: u8 },
+  ControlChange { index: u8, data: u8 },
+  ProgramChange { program: u8 },
+  ChannelPressure { data: u8 },
+  PitchBend { lsb_data: u8, msb_data: u8 },
+}
+
+impl Decode for ChannelVoice1 {
+  fn decode(ump: &[u32]) -> Self {
+    assert_eq!(ump.len(), 1);
+    let status = ((ump[0] >> 20) & 0xf) as u8;
+    let channel = ((ump[0] >> 16) & 0xf) as u8;
+    let data1 = ((ump[0] >> 8) & 0xff) as u8;
+    let data2 = (ump[0] & 0xff) as u8;
+    match status {
+      0b1000 => Self {
+        channel,
+        message: ChanelVoiceMessage1::NoteOff {
+          note: data1,
+          velocity: data2,
+        },
+      },
+      0b1001 => Self {
+        channel,
+        message: ChanelVoiceMessage1::NoteOn {
+          note: data1,
+          velocity: data2,
+        },
+      },
+      0b1010 => Self {
+        channel,
+        message: ChanelVoiceMessage1::PolyPressure {
+          note: data1,
+          data: data2,
+        },
+      },
+      0b1011 => Self {
+        channel,
+        message: ChanelVoiceMessage1::ControlChange {
+          index: data1,
+          data: data2,
+        },
+      },
+      0b1100 => Self {
+        channel,
+        message: ChanelVoiceMessage1::ProgramChange { program: data1 },
+      },
+      0b1101 => Self {
+        channel,
+        message: ChanelVoiceMessage1::ChannelPressure { data: data1 },
+      },
+      0b1110 => Self {
+        channel,
+        message: ChanelVoiceMessage1::PitchBend {
+          lsb_data: data1,
+          msb_data: data2,
+        },
+      },
+      _ => unreachable!(),
+    }
+  }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ChannelVoice {
   pub channel: u8,

@@ -1,3 +1,4 @@
+use crate::protocol::decoder::{DecoderProtocol, DecoderProtocol2, DecoderProtocol1};
 use arc_swap::ArcSwap;
 use jack::{AsyncClient, Client, MidiIn, NotificationHandler, Port, ProcessHandler, Unowned};
 use std::{
@@ -67,6 +68,7 @@ struct Input {
   filters: Arc<ArcSwap<HashMap<SourceId, Filter>>>,
   port: Port<MidiIn>,
   handler: InputHandler,
+  decoder: DecoderProtocol1,
 }
 
 #[derive(Clone)]
@@ -98,8 +100,8 @@ impl NotificationHandler for Notifications {
     println!("Freewheel");
   }
 
-  fn sample_rate(&mut self, _: &Client, _srate: jack::Frames) -> jack::Control {
-    println!("Sample rate");
+  fn sample_rate(&mut self, _: &Client, srate: jack::Frames) -> jack::Control {
+    println!("Sample rate {srate}");
     jack::Control::Continue
   }
 
@@ -118,20 +120,25 @@ impl NotificationHandler for Notifications {
     _old_name: &str,
     _new_name: &str,
   ) -> jack::Control {
-    println!("Port rename");
+    // println!("Port rename");
     jack::Control::Continue
   }
 
   fn ports_connected(
     &mut self,
     client: &Client,
-    _port_id_a: jack::PortId,
-    _port_id_b: jack::PortId,
-    _are_connected: bool,
+    port_id_a: jack::PortId,
+    port_id_b: jack::PortId,
+    are_connected: bool,
   ) {
-    let source_id = _port_id_a as u64;
-    let name = client.port_by_id(_port_id_a).unwrap().name().unwrap();
-    let port = client.port_by_id(_port_id_b).unwrap();
+    // TODO: Handle disconnection
+    if !are_connected {
+      println!("Port disconnected");
+      return;
+    }
+    let source_id = port_id_a as u64;
+    let name = client.port_by_id(port_id_a).unwrap().name().unwrap();
+    let port = client.port_by_id(port_id_b).unwrap();
     let mut endpoints = self.endpoints.lock().unwrap();
     endpoints.add_source(source_id, name.clone(), port.clone());
     for input in self.inputs.lock().unwrap().values_mut() {
@@ -148,7 +155,7 @@ impl NotificationHandler for Notifications {
   }
 
   fn graph_reorder(&mut self, _: &Client) -> jack::Control {
-    println!("Graph reorder");
+    // println!("Graph reorder");
     jack::Control::Continue
   }
 
@@ -161,18 +168,54 @@ impl NotificationHandler for Notifications {
 impl ProcessHandler for JackHost {
   fn process(&mut self, _: &jack::Client, ps: &jack::ProcessScope) -> jack::Control {
     for input in self.inputs.lock().unwrap().values_mut() {
-      let show_p = input.port.iter(ps);
-      for e in show_p {
-        // TODO: Build real message
-        let c: Event = Event {
-          endpoint: 0,
-          message: Message {
-            group: 0,
-            mtype: MessageType::Utility(Utility::Noop),
-          },
-          timestamp: e.time as u64,
-        };
-        input.handler.call(c);
+      for source_id in input.connected.iter() {
+        let default_filter = Filter::new();
+        let filters = input.filters.load();
+        let filter = filters.get(&source_id).unwrap_or(&default_filter);
+        let show_p = input.port.iter(ps);
+        input.decoder.reset();
+        for word in show_p {
+          // The first byte indicates the rest of the message is MIDI1
+          println!("word: {:?}", word.bytes);
+          let bytes: [u8; 4] = match word.bytes {
+            [one, two, three] => [0b0010_0000, *one, *two, *three],
+            [one, two] => [0b0010_0000, *one, *two, 0],
+            _ => panic!(),
+          };
+          println!("bytes: {:b} {:b} {:b} {:b}", bytes[0], bytes[1], bytes[2], bytes[3] );
+          use byteorder::{BigEndian, ReadBytesExt};
+          use std::io::Cursor;
+          let mut rdr = Cursor::new(bytes);
+          let res = rdr.read_u32::<BigEndian>().unwrap();
+          println!("bo: {:b}", res);
+          let bytes = u32::from_be_bytes(bytes);
+          println!("be: {:b}", bytes);
+          // let bytes = u32::from_ne_bytes(bytes);
+          // println!("ne: {:b}", _bytes);
+          // let bytes = u32::from_le_bytes(bytes);
+          // println!("le: {:b}", bytes);
+          // let unle: [u8; 4] = bytes.to_le_bytes();
+          // println!("unle: {:b} {:b} {:b} {:b}", unle[0], unle[1], unle[2], unle[3] );
+          if let Ok(Some(message)) = input.decoder.next(bytes, &filter) {
+            dbg!(message);
+            let event = Event {
+              timestamp: word.time as u64,
+              endpoint: *source_id,
+              message,
+            };
+            input.handler.call(event);
+          }
+          // TODO: Build real message
+          // let c: Event = Event {
+          //   endpoint: 0,
+          //   message: Message {
+          //     group: 0,
+          //     mtype: MessageType::Utility(Utility::Noop),
+          //   },
+          //   timestamp: e.time as u64,
+          // };
+          // input.handler.call(c);
+        }
       }
     }
     jack::Control::Continue
@@ -214,7 +257,6 @@ impl drivers::DriverSpec for JackMidiDriver {
     H: Into<crate::InputHandler>,
   {
     let host = &self.host;
-    // dbg!(&config.name);
     if host
       .inputs
       .lock()
@@ -223,13 +265,11 @@ impl drivers::DriverSpec for JackMidiDriver {
     {
       return Err(JackMidiError::InputAlreadyExists(config).into());
     };
-    println!("Input 1");
+
     let InputConfig { name, sources } = config;
     let client = self.active_client.as_client();
-    let filters = host
-      .endpoints
-      .lock()
-      .unwrap()
+    let endpoints = host.endpoints.lock().unwrap();
+    let filters = endpoints
       .connected_sources()
       .into_iter()
       .filter_map(|connected_source| {
@@ -244,16 +284,20 @@ impl drivers::DriverSpec for JackMidiDriver {
       .register_port(&name, MidiIn)
       .map_err(|_| JackMidiError::PortCreate)?;
 
-    let mut connected = HashSet::new();
-    let host = &self.host;
-    let endpoints = host.endpoints.lock().unwrap();
-    for source_id in filters.load().keys().cloned() {
-      if let Some(source) = endpoints.get_source(source_id) {
-        if let Ok(()) = client.connect_ports(&source, &port) {
-          connected.insert(source_id);
-        }
-      }
-    }
+    let connected: HashSet<u64> = filters
+      .load()
+      .keys()
+      .into_iter()
+      // For future me: I'm sorry
+      .filter_map(|source_id| {
+        endpoints.get_source(*source_id).and_then(|source| {
+          client
+            .connect_ports(&source, &port)
+            .map_or_else(|_err| None, |_| Some(*source_id))
+        })
+      })
+      .collect();
+
     let input = Input {
       name: name.clone(),
       sources,
@@ -261,34 +305,44 @@ impl drivers::DriverSpec for JackMidiDriver {
       filters,
       port,
       handler: handler.into(),
+      decoder: DecoderProtocol1::default(),
     };
     host.inputs.lock().unwrap().insert(name.clone(), input);
     Ok(name)
   }
 
   fn sources(&self) -> Vec<crate::endpoints::SourceInfo> {
-    let host = &self.host;
-    let endpoints = host.endpoints.lock().unwrap();
+    let inputs = self.host.inputs.lock().unwrap();
+    let mut source_inputs: HashMap<SourceId, Vec<String>> = inputs
+      .values()
+      .fold(
+        HashMap::new(),
+        |mut map: HashMap<SourceId, HashSet<String>>, input| {
+          for source_id in input.connected.iter() {
+            map
+              .entry(*source_id)
+              .or_default()
+              .insert(input.name.clone());
+          }
+          map
+        },
+      )
+      .into_iter()
+      .map(|(id, value)| (id, value.into_iter().collect::<Vec<String>>()))
+      .collect();
 
-    let mut source_inputs = HashMap::<SourceId, HashSet<String>>::new();
-    for input in host.inputs.lock().unwrap().values() {
-      for source_id in input.connected.iter().cloned() {
-        let inputs = source_inputs.entry(source_id).or_default();
-        inputs.insert(input.name.clone());
-      }
-    }
-    // dbg!(&source_inputs);
-
+    let endpoints = self.host.endpoints.lock().unwrap();
     endpoints
       .connected_sources()
       .into_iter()
       .map(|connected_source| {
-        // dbg!(&connected_source);
-        let inputs = source_inputs
-          .get(&connected_source.id)
-          .map(|inputs| inputs.iter().cloned().collect::<Vec<String>>())
-          .unwrap_or_default();
-        SourceInfo::new(connected_source.id, connected_source.name.clone(), inputs)
+        SourceInfo::new(
+          connected_source.id,
+          connected_source.name.clone(),
+          source_inputs
+            .remove(&connected_source.id)
+            .unwrap_or_default(),
+        )
       })
       .collect()
   }
@@ -302,7 +356,6 @@ impl drivers::DriverSpec for JackMidiDriver {
       .connected_destinations()
       .into_iter()
       .map(|connected_destination| {
-        // dbg!(&connected_destination);
         DestinationInfo::new(connected_destination.id, connected_destination.name.clone())
       })
       .collect()

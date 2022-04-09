@@ -1,6 +1,7 @@
 use thiserror::Error;
 
 use crate::filter::Filter;
+use crate::messages::channel_voice::ChannelVoice1;
 use crate::protocol::messages::channel_voice::ChannelVoice;
 use crate::protocol::messages::utility::Utility;
 use crate::protocol::messages::{Message, MessageType};
@@ -12,27 +13,37 @@ pub enum Error {
   Reserved,
 }
 
-#[derive(Default)]
-pub struct DecoderProtocol2 {
-  ump: [u32; 4],
-  index: usize,
-  len: usize,
-}
+pub trait DecoderProtocol {
+  fn get_index(&self) -> usize;
+  fn set_index(&mut self, index: usize);
+  fn decode(&mut self, mtype: u8, group: u8, filter: &Filter) -> Option<Message>;
+  fn get_len(&self) -> usize;
+  fn set_len(&mut self, len: usize);
+  fn get_ump_mut(&mut self) -> &mut [u32; 4];
+  fn get_ump(&self) -> &[u32; 4];
 
-impl DecoderProtocol2 {
-  pub fn next(&mut self, data: u32, filter: &Filter) -> Result<Option<Message>, Error> {
-    if self.index == 0 {
+  fn increase_index(&mut self) {
+    let index = self.get_index();
+    self.set_index(index + 1);
+  }
+
+  fn next(&mut self, data: u32, filter: &Filter) -> Result<Option<Message>, Error> {
+    if self.get_index() == 0 {
       self.init(data);
     }
     self.push(data);
+    println!("Len: {}", self.get_len());
+    println!("Iscomplete: {}", self.is_complete());
 
     let next_message = if self.is_complete() {
       let (mtype, group) = self.extract_mtype_and_group();
+      println!("mtype: {}, group: {}", mtype, group);
       let message = if filter.mtype(mtype) && filter.group(group) {
         self.decode(mtype, group, filter)
       } else {
         None
       };
+      println!("Message: {:?}", message);
       self.reset();
       message
     } else {
@@ -44,7 +55,7 @@ impl DecoderProtocol2 {
 
   fn init(&mut self, data: u32) {
     let mtype = (data >> 28) & 0x0f;
-    self.len = match mtype {
+    self.set_len(match mtype {
       0x00 => 1,
       0x01 => 1,
       0x02 => 1,
@@ -52,24 +63,87 @@ impl DecoderProtocol2 {
       0x04 => 2,
       0x05 => 4,
       _ => 1,
-    };
+    });
   }
 
   fn push(&mut self, data: u32) {
-    self.ump[self.index] = data;
-    self.index += 1;
+    let index = self.get_index();
+    self.get_ump_mut()[index] = data;
+    self.increase_index();
   }
 
   fn is_complete(&self) -> bool {
-    self.index == self.len
+    self.get_index() == self.get_len()
   }
 
   fn extract_mtype_and_group(&self) -> (u8, u8) {
-    let mtype = ((self.ump[0] >> 28) & 0x0f) as u8;
-    let group = ((self.ump[0] >> 24) & 0x0f) as u8;
+    let mtype = ((self.get_ump()[0] >> 28) & 0x0f) as u8;
+    let group = ((self.get_ump()[0] >> 24) & 0x0f) as u8;
     (mtype, group)
   }
 
+  fn reset(&mut self) {
+    self.set_index(0);
+    self.set_len(0);
+  }
+}
+
+#[derive(Default)]
+pub struct DecoderProtocol1 {
+  ump: [u32; 4],
+  index: usize,
+  len: usize,
+}
+
+impl DecoderProtocol for DecoderProtocol1 {
+  fn decode(&mut self, mtype: u8, group: u8, filter: &Filter) -> Option<Message> {
+    match mtype {
+      0x02 => {
+        let channel_voice = ChannelVoice1::decode(&self.ump[0..1]);
+        filter
+          .channel(group, channel_voice.channel)
+          .then(|| Message {
+            group,
+            mtype: MessageType::ChannelVoice1(channel_voice),
+          })
+      }
+      _ => None,
+    }
+  }
+
+  fn get_index(&self) -> usize {
+    self.index
+  }
+
+  fn set_index(&mut self, index: usize) {
+    self.index = index;
+  }
+
+  fn get_len(&self) -> usize {
+    self.len
+  }
+
+  fn set_len(&mut self, len: usize) {
+    self.len = len;
+  }
+
+  fn get_ump_mut(&mut self) -> &mut [u32; 4] {
+    &mut self.ump
+  }
+
+  fn get_ump(&self) -> &[u32; 4] {
+    &self.ump
+  }
+}
+
+#[derive(Default)]
+pub struct DecoderProtocol2 {
+  ump: [u32; 4],
+  index: usize,
+  len: usize,
+}
+
+impl DecoderProtocol for DecoderProtocol2 {
   fn decode(&mut self, mtype: u8, group: u8, filter: &Filter) -> Option<Message> {
     match mtype {
       0x00 => Some(Message {
@@ -88,17 +162,35 @@ impl DecoderProtocol2 {
       _ => None,
     }
   }
+  fn get_index(&self) -> usize {
+    self.index
+  }
 
-  pub fn reset(&mut self) {
-    self.index = 0;
-    self.len = 0;
+  fn set_index(&mut self, index: usize) {
+    self.index = index;
+  }
+
+  fn get_len(&self) -> usize {
+    self.len
+  }
+
+  fn set_len(&mut self, len: usize) {
+    self.len = len;
+  }
+
+  fn get_ump_mut(&mut self) -> &mut [u32; 4] {
+    &mut self.ump
+  }
+
+  fn get_ump(&self) -> &[u32; 4] {
+    &self.ump
   }
 }
 
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::protocol::decoder::DecoderProtocol2;
+  use crate::protocol::decoder::{DecoderProtocol2, DecoderProtocol};
   use crate::protocol::messages::channel_voice::ChanelVoiceMessage;
 
   #[test]

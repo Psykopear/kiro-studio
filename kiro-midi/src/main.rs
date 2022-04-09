@@ -10,8 +10,8 @@ fn main() {
     midi::Filter::default(),
   );
 
-  let input_config2 = midi::InputConfig::new("out").with_source(
-    midi::SourceMatch::regex("out.*").unwrap(),
+  let input_config2 = midi::InputConfig::new("novation").with_source(
+    midi::SourceMatch::regex("novation.*").unwrap(),
     midi::Filter::default(),
   );
 
@@ -21,7 +21,7 @@ fn main() {
     .unwrap();
 
   driver
-    .create_input(input_config2, |event| println!("out >> {:?}", event))
+    .create_input(input_config2, |event| println!("novation >> {:?}", event))
     .unwrap();
 
   println!("Inputs created");
