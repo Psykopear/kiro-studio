@@ -1,3 +1,5 @@
+/// TODOs: A lot of unwraps for every locked resource, we should probably handle those
+
 use arc_swap::ArcSwap;
 use jack::{AsyncClient, Client, MidiIn, NotificationHandler, Port, ProcessHandler, Unowned};
 use std::{
@@ -47,6 +49,41 @@ struct Notifications {
   pub inputs: Arc<Mutex<HashMap<String, Input>>>,
 }
 
+impl Notifications {
+  fn connect_port(
+    &mut self,
+    port_id_a: jack::PortId,
+    port_id_b: jack::PortId,
+    client: &Client,
+  ) -> Result<(), Box<dyn std::error::Error>> {
+    let source_id = port_id_a as u64;
+    let name = client
+      .port_by_id(port_id_a)
+      // TODO: More specific error
+      .ok_or(JackMidiError::PortCreate)?
+      .name()?;
+    let port = client
+      .port_by_id(port_id_b)
+      // TODO: More specific error
+      .ok_or(JackMidiError::PortCreate)?;
+
+    let mut endpoints = self.endpoints.lock().unwrap();
+    endpoints.add_source(source_id, name.clone(), port.clone());
+
+    for input in self.inputs.lock().unwrap().values_mut() {
+      if !input.connected.contains(&source_id) {
+        if let Some(filter) = input.sources.match_filter(source_id, name.as_str()) {
+          let mut filters = input.filters.load().as_ref().clone();
+          filters.insert(source_id, filter);
+          input.filters.swap(Arc::new(filters));
+          input.connected.insert(source_id);
+        }
+      }
+    }
+    Ok(())
+  }
+}
+
 pub struct JackMidiDriver {
   active_client: AsyncClient<Notifications, JackHost>,
   host: Arc<JackHost>,
@@ -85,7 +122,6 @@ impl NotificationHandler for Notifications {
     _old_name: &str,
     _new_name: &str,
   ) -> jack::Control {
-    // println!("Port rename");
     jack::Control::Continue
   }
 
@@ -101,26 +137,15 @@ impl NotificationHandler for Notifications {
       println!("Port disconnected");
       return;
     }
-    let source_id = port_id_a as u64;
-    let name = client.port_by_id(port_id_a).unwrap().name().unwrap();
-    let port = client.port_by_id(port_id_b).unwrap();
-    let mut endpoints = self.endpoints.lock().unwrap();
-    endpoints.add_source(source_id, name.clone(), port.clone());
-    for input in self.inputs.lock().unwrap().values_mut() {
-      if !input.connected.contains(&source_id) {
-        if let Some(filter) = input.sources.match_filter(source_id, name.as_str()) {
-          let mut filters = input.filters.load().as_ref().clone();
-          filters.insert(source_id, filter);
-          input.filters.swap(Arc::new(filters));
-          input.connected.insert(source_id);
-        }
-      }
+    if let Err(err) = self.connect_port(port_id_a, port_id_b, client) {
+      // TODO: Handle errors
+      dbg!(err);
+    } else {
+      println!("Port connected");
     }
-    println!("Port connected");
   }
 
   fn graph_reorder(&mut self, _: &Client) -> jack::Control {
-    // println!("Graph reorder");
     jack::Control::Continue
   }
 
@@ -137,15 +162,20 @@ impl ProcessHandler for JackHost {
         let default_filter = Filter::new();
         let filters = input.filters.load();
         let filter = filters.get(&source_id).unwrap_or(&default_filter);
-        let show_p = input.port.iter(ps);
+        let events = input.port.iter(ps);
         input.decoder.reset();
-        for word in show_p {
+        for word in events {
+          // Convert to UMP
           // The first byte indicates the rest of the message is MIDI1
           let bytes: [u8; 4] = match word.bytes {
             [one, two, three] => [0b0010_0000, *one, *two, *three],
+            // If the midi message is 2 bytes, we set the last one to 0
             [one, two] => [0b0010_0000, *one, *two, 0],
+            // This shouldn't happen
+            // TODO: Are we absolutely sure?
             _ => panic!(),
           };
+          // TODO: is it always big endian?
           let bytes = u32::from_be_bytes(bytes);
           if let Ok(Some(message)) = input.decoder.next(bytes, &filter) {
             let event = Event {
@@ -167,16 +197,17 @@ impl JackMidiDriver {
     let endpoints = Arc::new(Mutex::new(Endpoints::new()));
     let inputs = Arc::new(Mutex::new(HashMap::new()));
     let mut host = Arc::new(JackHost { endpoints, inputs });
-    let not_host = Arc::make_mut(&mut host);
+    let notifications_host = Arc::make_mut(&mut host);
     let (client, _status) = jack::Client::new(name, jack::ClientOptions::NO_START_SERVER)
       .map_err(|_| JackMidiError::ClientCreate)?;
+
     let active_client = client
       .activate_async(
         Notifications {
-          inputs: not_host.inputs.clone(),
-          endpoints: not_host.endpoints.clone(),
+          inputs: notifications_host.inputs.clone(),
+          endpoints: notifications_host.endpoints.clone(),
         },
-        not_host.to_owned(),
+        notifications_host.to_owned(),
       )
       .unwrap();
     Ok(Self {
